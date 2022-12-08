@@ -1,34 +1,47 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"sort"
+	"time"
 )
 
-const PortCount = 1024
+const PortCount = 1024 // TODO: 09.12.2022 change to set from flags
 
-func worker(ports, results chan int) {
-	for port := range ports {
-		address := fmt.Sprintf("192.168.1.1:%d", port)
-		conn, err := net.Dial("tcp", address)
-		if err != nil {
-			results <- 0
-			continue
-		}
-		conn.Close()
-		results <- port
-	}
+type ScanResult struct {
+	Protocol string
+	Port     int
+	State    string
 }
-func main() {
-	fmt.Printf("Welcome to red scanner!\n")
+
+type PortSorter []ScanResult
+
+func (a PortSorter) Len() int      { return len(a) }
+func (a PortSorter) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+func (a PortSorter) Less(i, j int) bool {
+	return a[i].Port < a[j].Port
+}
+
+type ScanObject struct {
+	Protocol string
+	Hostname string
+}
+
+func StartScan(protocol, host string) error {
+	hostname, err := hostnameValidator(host)
+	if err != nil {
+		return err
+	}
 	ports := make(chan int, 100)
-	results := make(chan int)
+	results := make(chan ScanResult)
+	scan := ScanObject{Hostname: hostname, Protocol: protocol}
+	var scanResults []ScanResult
 	defer close(ports)
 	defer close(results)
-	var openports []int
-	for i := 0; i < cap(ports); i++ {
-		go worker(ports, results)
+	for i := 0; i <= cap(ports); i++ {
+		go worker(scan, ports, results)
 	}
 
 	go func() {
@@ -37,18 +50,46 @@ func main() {
 		}
 	}()
 
-	for i := 0; i < PortCount-1; i++ {
-		port := <-results
-		if port != 0 {
-			openports = append(openports, port)
+	printScanResult(results, scanResults)
+	return nil
+}
+
+func printScanResult(results chan ScanResult, scanResults []ScanResult) {
+	for i := 1; i <= PortCount; i++ {
+		scanResult := <-results
+		if scanResult.Port != -1 {
+			scanResults = append(scanResults, scanResult)
 		}
 	}
-	sort.Ints(openports)
+	sort.Sort(PortSorter(scanResults))
+	fmt.Printf("\n\t\tSCAN RESULT:\n")
 	fmt.Printf("==================================================\n")
-	fmt.Printf("\t\tScan result:\n")
-	fmt.Printf("==================================================\n")
-	for _, port := range openports {
-		fmt.Printf("\t\t\t%d\topen\n", port)
+	for _, port := range scanResults {
+		fmt.Printf("\t%s\t%d\t%s\n", port.Protocol, port.Port, port.State)
 	}
 	fmt.Printf("==================================================\n")
+}
+
+func hostnameValidator(hostname string) (string, error) {
+	n := len(hostname)
+	address := hostname
+	if n > 0 && hostname[n-1] != ':' {
+		address = address + ":"
+	} else if n == 0 {
+		return "", errors.New("missing address to scan")
+	}
+	return address, nil
+}
+
+func worker(scan ScanObject, ports chan int, results chan ScanResult) {
+	for port := range ports {
+		address := fmt.Sprintf("%s%d", scan.Hostname, port)
+		conn, err := net.DialTimeout(scan.Protocol, address, 10*time.Second)
+		if err != nil {
+			results <- ScanResult{Protocol: scan.Protocol, Port: -1, State: "Closed"}
+			continue
+		}
+		conn.Close()
+		results <- ScanResult{Protocol: scan.Protocol, Port: port, State: "Open"}
+	}
 }
