@@ -1,9 +1,10 @@
-package main
+package netscanner
 
 import (
 	"errors"
 	"fmt"
 	"net"
+	sp "net-tool/spinner"
 	"sort"
 	"time"
 )
@@ -36,10 +37,12 @@ func StartScan(protocol, host string) error {
 	}
 	ports := make(chan int, 100)
 	results := make(chan ScanResult)
+	done := make(chan bool)
 	scan := ScanObject{Hostname: hostname, Protocol: protocol}
 	var scanResults []ScanResult
-	defer close(ports)
-	defer close(results)
+
+	go sp.Spinner(done, "")
+
 	for i := 0; i < cap(ports); i++ {
 		go worker(scan, ports, results)
 	}
@@ -48,13 +51,9 @@ func StartScan(protocol, host string) error {
 		for i := 1; i <= PortCount; i++ {
 			ports <- i
 		}
+		close(ports)
 	}()
 
-	printScanResult(results, scanResults)
-	return nil
-}
-
-func printScanResult(results chan ScanResult, scanResults []ScanResult) {
 	for i := 1; i <= PortCount; i++ {
 		scanResult := <-results
 		if scanResult.Port != -1 {
@@ -62,6 +61,13 @@ func printScanResult(results chan ScanResult, scanResults []ScanResult) {
 		}
 	}
 	sort.Sort(PortSorter(scanResults))
+	done <- true
+
+	printScanResult(scanResults)
+	return nil
+}
+
+func printScanResult(scanResults []ScanResult) {
 	fmt.Printf("\n\t\tSCAN RESULT:\n")
 	fmt.Printf("==================================================\n")
 	for _, port := range scanResults {
