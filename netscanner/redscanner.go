@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const PortCount = 1024 // TODO: 09.12.2022 change to set from flags
+const PortCount = 65535
 
 type ScanResult struct {
 	Protocol string
@@ -40,7 +40,7 @@ func StartScan(protocol, host string) error {
 	var scanResults []ScanResult
 	defer close(ports)
 	defer close(results)
-	for i := 0; i <= cap(ports); i++ {
+	for i := 0; i < cap(ports); i++ {
 		go worker(scan, ports, results)
 	}
 
@@ -84,7 +84,7 @@ func hostnameValidator(hostname string) (string, error) {
 func worker(scan ScanObject, ports chan int, results chan ScanResult) {
 	for port := range ports {
 		address := fmt.Sprintf("%s%d", scan.Hostname, port)
-		conn, err := net.DialTimeout(scan.Protocol, address, 10*time.Second)
+		conn, err := net.DialTimeout(scan.Protocol, address, 1*time.Second)
 		if err != nil {
 			results <- ScanResult{Protocol: scan.Protocol, Port: -1, State: "Closed"}
 			continue
