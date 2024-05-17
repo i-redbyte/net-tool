@@ -6,10 +6,14 @@ import (
 	"net"
 	sp "net-tool/spinner"
 	"sort"
+	"sync"
 	"time"
 )
 
-const PortCount = 65535
+const (
+	PortCount     = 65535
+	MaxGoroutines = 1000
+)
 
 type ScanResult struct {
 	Protocol string
@@ -19,11 +23,9 @@ type ScanResult struct {
 
 type PortSorter []ScanResult
 
-func (a PortSorter) Len() int      { return len(a) }
-func (a PortSorter) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
-func (a PortSorter) Less(i, j int) bool {
-	return a[i].Port < a[j].Port
-}
+func (a PortSorter) Len() int           { return len(a) }
+func (a PortSorter) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a PortSorter) Less(i, j int) bool { return a[i].Port < a[j].Port }
 
 type ScanObject struct {
 	Protocol string
@@ -31,71 +33,81 @@ type ScanObject struct {
 }
 
 func StartScan(protocol, host string) error {
-	hostname, err := hostnameValidator(host)
+	hostname, err := resolveHost(host)
 	if err != nil {
 		return err
 	}
-	ports := make(chan int, 100)
-	results := make(chan ScanResult)
+	fmt.Printf("Resolved hostname: %s\n", hostname)
+	results := make(chan ScanResult, PortCount)
 	done := make(chan bool)
-	scan := ScanObject{Hostname: hostname, Protocol: protocol}
 	var scanResults []ScanResult
+	var wg sync.WaitGroup
 
-	go sp.Spinner(done, "")
+	go sp.Spinner(done, "Done")
 
-	for i := 0; i < cap(ports); i++ {
-		go worker(scan, ports, results)
+	semaphore := make(chan struct{}, MaxGoroutines)
+
+	for port := 1; port <= PortCount; port++ {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			semaphore <- struct{}{}
+			scanPort(protocol, hostname, p, results)
+			<-semaphore
+		}(port)
 	}
 
 	go func() {
-		for i := 1; i <= PortCount; i++ {
-			ports <- i
-		}
-		close(ports)
+		wg.Wait()
+		close(results)
+		done <- true
 	}()
 
-	for i := 1; i <= PortCount; i++ {
-		scanResult := <-results
+	for scanResult := range results {
 		if scanResult.Port != -1 {
 			scanResults = append(scanResults, scanResult)
 		}
 	}
 	sort.Sort(PortSorter(scanResults))
-	done <- true
 
 	printScanResult(scanResults)
 	return nil
 }
 
+func resolveHost(host string) (string, error) {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		ips, err := net.LookupIP(host)
+		if err != nil {
+			return "", err
+		}
+		if len(ips) == 0 {
+			return "", errors.New("no IP addresses found for host")
+		}
+		ip = ips[0]
+	}
+	return ip.String() + ":", nil
+}
+
 func printScanResult(scanResults []ScanResult) {
 	fmt.Printf("\n\t\tSCAN RESULT:\n")
 	fmt.Printf("==================================================\n")
+	if len(scanResults) == 0 {
+		fmt.Printf("No open ports found.\n")
+	}
 	for _, port := range scanResults {
 		fmt.Printf("\t%s\t%d\t%s\n", port.Protocol, port.Port, port.State)
 	}
 	fmt.Printf("==================================================\n")
 }
 
-func hostnameValidator(hostname string) (string, error) {
-	n := len(hostname)
-	address := hostname
-	if n > 0 && hostname[n-1] != ':' {
-		address = address + ":"
-	} else if n == 0 {
-		return "", errors.New("missing address to scan")
+func scanPort(protocol, hostname string, port int, results chan ScanResult) {
+	address := fmt.Sprintf("%s%d", hostname, port)
+	conn, err := net.DialTimeout(protocol, address, 1*time.Second)
+	if err != nil {
+		results <- ScanResult{Protocol: protocol, Port: -1, State: "Closed"}
+		return
 	}
-	return address, nil
-}
-
-func worker(scan ScanObject, ports chan int, results chan ScanResult) {
-	for port := range ports {
-		address := fmt.Sprintf("%s%d", scan.Hostname, port)
-		conn, err := net.DialTimeout(scan.Protocol, address, 1*time.Second)
-		if err != nil {
-			results <- ScanResult{Protocol: scan.Protocol, Port: -1, State: "Closed"}
-			continue
-		}
-		conn.Close()
-		results <- ScanResult{Protocol: scan.Protocol, Port: port, State: "Open"}
-	}
+	conn.Close()
+	results <- ScanResult{Protocol: protocol, Port: port, State: "Open"}
 }
