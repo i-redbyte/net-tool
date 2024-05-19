@@ -13,6 +13,7 @@ import (
 const (
 	PortCount     = 65535
 	MaxGoroutines = 1000
+	Timeout       = 100 * time.Millisecond
 )
 
 type ScanResult struct {
@@ -33,6 +34,8 @@ type ScanObject struct {
 }
 
 func StartScan(protocol, host string) error {
+	startTime := time.Now()
+
 	hostname, err := resolveHost(host)
 	if err != nil {
 		return err
@@ -45,16 +48,21 @@ func StartScan(protocol, host string) error {
 
 	go sp.Spinner(done, "Done")
 
-	semaphore := make(chan struct{}, MaxGoroutines)
+	portsPerGoroutine := PortCount / MaxGoroutines
 
-	for port := 1; port <= PortCount; port++ {
+	for i := 0; i < MaxGoroutines; i++ {
 		wg.Add(1)
-		go func(p int) {
+		startPort := i * portsPerGoroutine
+		endPort := startPort + portsPerGoroutine
+		if i == MaxGoroutines-1 {
+			endPort = PortCount + 1
+		}
+		go func(start, end int) {
 			defer wg.Done()
-			semaphore <- struct{}{}
-			scanPort(protocol, hostname, p, results)
-			<-semaphore
-		}(port)
+			for port := start; port < end; port++ {
+				scanPort(protocol, hostname, port, results)
+			}
+		}(startPort, endPort)
 	}
 
 	go func() {
@@ -70,7 +78,8 @@ func StartScan(protocol, host string) error {
 	}
 	sort.Sort(PortSorter(scanResults))
 
-	printScanResult(scanResults)
+	elapsedTime := time.Since(startTime).Seconds()
+	printScanResult(scanResults, elapsedTime)
 	return nil
 }
 
@@ -89,8 +98,8 @@ func resolveHost(host string) (string, error) {
 	return ip.String() + ":", nil
 }
 
-func printScanResult(scanResults []ScanResult) {
-	fmt.Printf("\n\t\tSCAN RESULT:\n")
+func printScanResult(scanResults []ScanResult, elapsedTime float64) {
+	fmt.Printf("\n\t\tSCAN RESULT (%.2f seconds):\n", elapsedTime)
 	fmt.Printf("==================================================\n")
 	if len(scanResults) == 0 {
 		fmt.Printf("No open ports found.\n")
@@ -103,7 +112,7 @@ func printScanResult(scanResults []ScanResult) {
 
 func scanPort(protocol, hostname string, port int, results chan ScanResult) {
 	address := fmt.Sprintf("%s%d", hostname, port)
-	conn, err := net.DialTimeout(protocol, address, 1*time.Second)
+	conn, err := net.DialTimeout(protocol, address, Timeout)
 	if err != nil {
 		results <- ScanResult{Protocol: protocol, Port: -1, State: "Closed"}
 		return
